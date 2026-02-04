@@ -34,7 +34,8 @@
 
         .settings-btn { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); background: rgba(128,128,128,0.3); padding: 10px 20px; border-radius: 20px; font-size: 14px; backdrop-filter: blur(10px); font-weight: 600; cursor: pointer;}
         
-        #error-msg { color: var(--red); font-size: 12px; text-align: center; margin-top: 20px; display: none; line-height: 1.5; }
+        #status-msg { text-align: center; color: #999; font-size: 12px; margin-top: 50px; line-height: 1.6; }
+        .retry-btn { color: #007aff; text-decoration: underline; cursor: pointer; margin-left: 5px; }
     </style>
 </head>
 <body>
@@ -44,14 +45,12 @@
         <div class="btn" onclick="toggleMode()">👁️</div>
     </div>
 
-    <div id="fundList">
-        <div style="text-align:center; color:#999; margin-top:50px;">
-            正在连接官方数据...<br>
-            <span style="font-size:12px; opacity:0.6">(V3.0 Proxy版)</span>
-        </div>
-    </div>
+    <div id="fundList"></div>
     
-    <div id="error-msg"></div>
+    <div id="status-msg">
+        正在连接极速通道...<br>
+        <span style="font-size:10px; opacity:0.6">(V4.0 Dual-Core)</span>
+    </div>
 
     <div class="settings-btn" onclick="editConfig()">⚙️ 配置持仓</div>
 
@@ -66,6 +65,11 @@
         // === 2. 渲染函数 ===
         function render(dataList) {
             const container = document.getElementById('fundList');
+            const msgDiv = document.getElementById('status-msg');
+            
+            // 隐藏加载提示
+            msgDiv.style.display = 'none';
+
             document.body.className = isHidden ? 'blur' : '';
             document.getElementById('appTitle').innerText = isHidden ? '📚 单词打卡' : '💰 我的小金库';
 
@@ -80,18 +84,16 @@
 
             myFunds.forEach(fund => {
                 const item = dataMap[fund.code];
-                // 如果获取失败，显示占位
                 if (!item) {
                     html += `<div class="card"><div class="left"><span class="name">加载中...</span><span class="code">${fund.code}</span></div></div>`;
                     return;
                 }
 
-                // 计算逻辑：天天基金返回的 gsz(实时净值) - dwjz(昨日净值)
-                const currentPrice = parseFloat(item.gsz || item.dwjz); // 如果没开盘就用净值
+                // 核心计算逻辑
+                const currentPrice = parseFloat(item.gsz || item.dwjz); 
                 const yesterdayPrice = parseFloat(item.dwjz);
                 const growthRate = parseFloat(item.gszzl || "0");
                 
-                // 只有当有实时估值时才算收益，否则为0
                 let profit = 0;
                 if(item.gsz && item.dwjz) {
                      profit = (currentPrice - yesterdayPrice) * fund.shares;
@@ -125,38 +127,91 @@
             container.innerHTML = html;
         }
 
-        // === 3. 核心：通过 Proxy 获取官方数据 ===
-        async function fetchData() {
+        // === 3. 核心：双通道获取数据 ===
+        
+        // 通道A: 使用 corsproxy.io 代理天天基金 (速度最快)
+        async function fetchViaProxy() {
             const promises = myFunds.map(fund => {
-                // 原始 HTTP 官方接口
-                const targetUrl = `http://fundgz.1234567.com.cn/js/gszzl.js?code=${fund.code}&t=${Date.now()}`;
-                // 使用 allorigins 代理转发 (将 HTTP 转为 HTTPS)
-                const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
-                
-                return fetch(proxyUrl)
-                    .then(res => {
-                        if(!res.ok) throw new Error("Network");
-                        return res.text();
-                    })
-                    .then(text => {
-                        // 解析 JSONP: jsonpgz({...});
-                        const match = text.match(/jsonpgz\((.*?)\)/);
-                        if(match && match[1]) return JSON.parse(match[1]);
-                        return null;
-                    })
-                    .catch(err => null); // 单个失败不影响整体
+                const target = `http://fundgz.1234567.com.cn/js/gszzl.js?code=${fund.code}&t=${Date.now()}`;
+                const proxy = `https://corsproxy.io/?${encodeURIComponent(target)}`;
+                return fetch(proxy).then(res => res.text()).then(text => {
+                    const match = text.match(/jsonpgz\((.*?)\)/);
+                    return match ? JSON.parse(match[1]) : null;
+                });
             });
+            return Promise.all(promises);
+        }
 
+        // 通道B: 使用 DoctorXiong API (备用)
+        async function fetchViaAPI() {
+            const codes = myFunds.map(f => f.code).join(',');
+            const res = await fetch(`https://api.doctorxiong.club/v1/fund?code=${codes}`);
+            const json = await res.json();
+            if(json.code === 200) return json.data;
+            throw new Error("API Error");
+        }
+
+        // 主控制函数
+        async function fetchData() {
+            const msgDiv = document.getElementById('status-msg');
+            
             try {
-                const results = await Promise.all(promises);
-                const validResults = results.filter(r => r !== null);
-                
-                if (validResults.length > 0) {
-                    render(validResults);
-                    document.getElementById('error-msg').style.display = 'none';
-                } else {
-                    throw new Error("所有数据加载失败，请检查网络");
+                // 1. 尝试首选通道
+                const results = await fetchViaProxy();
+                const valid = results.filter(r => r !== null);
+                if(valid.length > 0) {
+                    render(valid);
+                    return;
                 }
-            } catch (err) {
-                console.error(err);
-                document.getElementById('error-msg').style.display = '
+                throw new Error("Proxy empty");
+            } catch (e1) {
+                console.log("通道A失败，切换通道B...", e1);
+                msgDiv.innerHTML = "极速通道拥堵，正在切换备用线路...";
+                
+                try {
+                    // 2. 尝试备用通道
+                    const resultsB = await fetchViaAPI();
+                    render(resultsB);
+                } catch (e2) {
+                    console.error(e2);
+                    msgDiv.innerHTML = `⚠️ 网络连接困难<br>请检查网络或 <span class="retry-btn" onclick="fetchData()">点击重试</span>`;
+                }
+            }
+        }
+
+        // === 4. 交互逻辑 ===
+        function toggleMode() {
+            isHidden = !isHidden;
+            localStorage.setItem('isHidden', isHidden);
+            fetchData();
+        }
+
+        function editConfig() {
+            const defaultStr = myFunds.map(f => `${f.code},${f.shares}`).join('; ');
+            const input = prompt("修改持仓 (格式: 代码,份额)\n多只基金用分号隔开:", defaultStr);
+            if (input) {
+                try {
+                    const newFunds = input.split(/[;；]/).map(str => { 
+                        const parts = str.trim().split(/[,，]/); 
+                        if (parts.length < 2) return null;
+                        return { code: parts[0].trim(), shares: parseFloat(parts[1]) };
+                    }).filter(item => item !== null);
+                    
+                    if(newFunds.length > 0) {
+                        myFunds = newFunds;
+                        localStorage.setItem('myFunds', JSON.stringify(myFunds));
+                        document.getElementById('fundList').innerHTML = ''; // 清空旧的
+                        document.getElementById('status-msg').style.display = 'block';
+                        document.getElementById('status-msg').innerText = "配置保存成功，刷新中...";
+                        fetchData(); 
+                    }
+                } catch (e) { alert("格式有误"); }
+            }
+        }
+
+        // 启动
+        fetchData();
+        setInterval(fetchData, 30000); 
+    </script>
+</body>
+</html>
