@@ -28,14 +28,12 @@
         .up { color: var(--red); }
         .down { color: var(--green); }
         
-        /* 摸鱼模式 */
         .blur .profit { filter: blur(6px); opacity: 0.5; }
         .blur .total-area { display: none; }
 
         .settings-btn { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); background: rgba(128,128,128,0.3); padding: 10px 20px; border-radius: 20px; font-size: 14px; backdrop-filter: blur(10px); font-weight: 600; cursor: pointer;}
         
-        #status-msg { text-align: center; color: #999; font-size: 12px; margin-top: 50px; line-height: 1.6; }
-        .retry-btn { color: #007aff; text-decoration: underline; cursor: pointer; margin-left: 5px; }
+        #status-msg { text-align: center; color: #999; font-size: 12px; margin-top: 50px; }
     </style>
 </head>
 <body>
@@ -46,61 +44,52 @@
     </div>
 
     <div id="fundList"></div>
-    
-    <div id="status-msg">
-        正在连接极速通道...<br>
-        <span style="font-size:10px; opacity:0.6">(V4.0 Dual-Core)</span>
-    </div>
+    <div id="status-msg">正在通过 Vercel 加速通道连接...</div>
 
     <div class="settings-btn" onclick="editConfig()">⚙️ 配置持仓</div>
 
     <script>
-        // === 1. 初始化配置 ===
+        // === 配置区域 ===
         let myFunds = JSON.parse(localStorage.getItem('myFunds')) || [
             { code: "021074", shares: 1000 }, 
             { code: "005827", shares: 500 }
         ];
         let isHidden = localStorage.getItem('isHidden') === 'true';
 
-        // === 2. 渲染函数 ===
+        // === 渲染函数 ===
         function render(dataList) {
             const container = document.getElementById('fundList');
-            const msgDiv = document.getElementById('status-msg');
-            
-            // 隐藏加载提示
-            msgDiv.style.display = 'none';
-
+            document.getElementById('status-msg').style.display = 'none';
             document.body.className = isHidden ? 'blur' : '';
             document.getElementById('appTitle').innerText = isHidden ? '📚 单词打卡' : '💰 我的小金库';
 
-            if(!dataList || dataList.length === 0) return;
-
             let totalProfit = 0;
             let html = '';
-
-            // 建立字典方便查询
+            
+            // 转为字典方便查找
             const dataMap = {};
             dataList.forEach(d => dataMap[d.fundcode] = d);
 
             myFunds.forEach(fund => {
                 const item = dataMap[fund.code];
                 if (!item) {
-                    html += `<div class="card"><div class="left"><span class="name">加载中...</span><span class="code">${fund.code}</span></div></div>`;
+                    html += `<div class="card"><div class="left"><span class="name">读取中...</span><span class="code">${fund.code}</span></div></div>`;
                     return;
                 }
 
-                // 核心计算逻辑
-                const currentPrice = parseFloat(item.gsz || item.dwjz); 
-                const yesterdayPrice = parseFloat(item.dwjz);
-                const growthRate = parseFloat(item.gszzl || "0");
+                // 计算逻辑
+                const current = parseFloat(item.gsz || item.dwjz);
+                const yesterday = parseFloat(item.dwjz);
+                const rate = parseFloat(item.gszzl || "0");
                 
+                // 只有当天有估值才算当日收益
                 let profit = 0;
-                if(item.gsz && item.dwjz) {
-                     profit = (currentPrice - yesterdayPrice) * fund.shares;
+                if (item.gsz && item.dwjz) {
+                    profit = (current - yesterday) * fund.shares;
                 }
                 
                 totalProfit += profit;
-                const isUp = growthRate >= 0;
+                const isUp = rate >= 0;
 
                 html += `
                 <div class="card">
@@ -109,7 +98,7 @@
                         <span class="code">${fund.code}</span>
                     </div>
                     <div class="right">
-                        <span class="rate ${isUp ? 'up' : 'down'}">${isUp ? '+' : ''}${growthRate}%</span>
+                        <span class="rate ${isUp ? 'up' : 'down'}">${isUp ? '+' : ''}${rate}%</span>
                         <span class="profit ${profit >= 0 ? 'up' : 'down'}">${profit > 0 ? '+' : ''}${profit.toFixed(1)}</span>
                     </div>
                 </div>`;
@@ -123,63 +112,33 @@
                     </div>
                 </div>`;
             }
-            
             container.innerHTML = html;
         }
 
-        // === 3. 核心：双通道获取数据 ===
-        
-        // 通道A: 使用 corsproxy.io 代理天天基金 (速度最快)
-        async function fetchViaProxy() {
-            const promises = myFunds.map(fund => {
-                const target = `http://fundgz.1234567.com.cn/js/gszzl.js?code=${fund.code}&t=${Date.now()}`;
-                const proxy = `https://corsproxy.io/?${encodeURIComponent(target)}`;
-                return fetch(proxy).then(res => res.text()).then(text => {
-                    const match = text.match(/jsonpgz\((.*?)\)/);
-                    return match ? JSON.parse(match[1]) : null;
-                });
-            });
-            return Promise.all(promises);
-        }
-
-        // 通道B: 使用 DoctorXiong API (备用)
-        async function fetchViaAPI() {
-            const codes = myFunds.map(f => f.code).join(',');
-            const res = await fetch(`https://api.doctorxiong.club/v1/fund?code=${codes}`);
-            const json = await res.json();
-            if(json.code === 200) return json.data;
-            throw new Error("API Error");
-        }
-
-        // 主控制函数
+        // === 核心：使用 Vercel 自家路由转发 (最稳方案) ===
         async function fetchData() {
-            const msgDiv = document.getElementById('status-msg');
+            const promises = myFunds.map(fund => {
+                // 直接请求我们刚才在 vercel.json 里配置的 /api/fund 路径
+                // Vercel 服务器会在后台帮我们去请求天天基金，绕过浏览器限制
+                return fetch(`/api/fund?code=${fund.code}&t=${Date.now()}`)
+                    .then(res => res.text())
+                    .then(text => {
+                        const match = text.match(/jsonpgz\((.*?)\)/);
+                        return match ? JSON.parse(match[1]) : null;
+                    })
+                    .catch(err => null);
+            });
+
+            const results = await Promise.all(promises);
+            const valid = results.filter(r => r !== null);
             
-            try {
-                // 1. 尝试首选通道
-                const results = await fetchViaProxy();
-                const valid = results.filter(r => r !== null);
-                if(valid.length > 0) {
-                    render(valid);
-                    return;
-                }
-                throw new Error("Proxy empty");
-            } catch (e1) {
-                console.log("通道A失败，切换通道B...", e1);
-                msgDiv.innerHTML = "极速通道拥堵，正在切换备用线路...";
-                
-                try {
-                    // 2. 尝试备用通道
-                    const resultsB = await fetchViaAPI();
-                    render(resultsB);
-                } catch (e2) {
-                    console.error(e2);
-                    msgDiv.innerHTML = `⚠️ 网络连接困难<br>请检查网络或 <span class="retry-btn" onclick="fetchData()">点击重试</span>`;
-                }
+            if (valid.length > 0) {
+                render(valid);
+            } else {
+                document.getElementById('status-msg').innerText = "加载超时，Vercel 正在冷启动，请手动刷新页面试试";
             }
         }
 
-        // === 4. 交互逻辑 ===
         function toggleMode() {
             isHidden = !isHidden;
             localStorage.setItem('isHidden', isHidden);
@@ -188,7 +147,7 @@
 
         function editConfig() {
             const defaultStr = myFunds.map(f => `${f.code},${f.shares}`).join('; ');
-            const input = prompt("修改持仓 (格式: 代码,份额)\n多只基金用分号隔开:", defaultStr);
+            const input = prompt("修改持仓 (格式: 代码,份额):", defaultStr);
             if (input) {
                 try {
                     const newFunds = input.split(/[;；]/).map(str => { 
@@ -196,22 +155,17 @@
                         if (parts.length < 2) return null;
                         return { code: parts[0].trim(), shares: parseFloat(parts[1]) };
                     }).filter(item => item !== null);
-                    
                     if(newFunds.length > 0) {
                         myFunds = newFunds;
                         localStorage.setItem('myFunds', JSON.stringify(myFunds));
-                        document.getElementById('fundList').innerHTML = ''; // 清空旧的
-                        document.getElementById('status-msg').style.display = 'block';
-                        document.getElementById('status-msg').innerText = "配置保存成功，刷新中...";
                         fetchData(); 
                     }
-                } catch (e) { alert("格式有误"); }
+                } catch (e) { alert("格式错误"); }
             }
         }
 
-        // 启动
         fetchData();
-        setInterval(fetchData, 30000); 
+        setInterval(fetchData, 30000);
     </script>
 </body>
 </html>
