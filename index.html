@@ -33,7 +33,7 @@
 
         .settings-btn { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); background: rgba(128,128,128,0.3); padding: 10px 20px; border-radius: 20px; font-size: 14px; backdrop-filter: blur(10px); font-weight: 600; cursor: pointer;}
         
-        #status-msg { text-align: center; color: #999; font-size: 12px; margin-top: 50px; }
+        #status-msg { text-align: center; color: #999; font-size: 12px; margin-top: 50px; display: none; }
     </style>
 </head>
 <body>
@@ -44,7 +44,7 @@
     </div>
 
     <div id="fundList"></div>
-    <div id="status-msg">正在通过 Vercel 加速通道连接...</div>
+    <div id="status-msg">正在连接新浪财经...</div>
 
     <div class="settings-btn" onclick="editConfig()">⚙️ 配置持仓</div>
 
@@ -57,7 +57,7 @@
         let isHidden = localStorage.getItem('isHidden') === 'true';
 
         // === 渲染函数 ===
-        function render(dataList) {
+        function render(dataMap) {
             const container = document.getElementById('fundList');
             document.getElementById('status-msg').style.display = 'none';
             document.body.className = isHidden ? 'blur' : '';
@@ -65,31 +65,32 @@
 
             let totalProfit = 0;
             let html = '';
-            
-            // 转为字典方便查找
-            const dataMap = {};
-            dataList.forEach(d => dataMap[d.fundcode] = d);
 
             myFunds.forEach(fund => {
                 const item = dataMap[fund.code];
+                
+                // 如果获取失败
                 if (!item) {
-                    html += `<div class="card"><div class="left"><span class="name">读取中...</span><span class="code">${fund.code}</span></div></div>`;
+                    html += `<div class="card"><div class="left"><span class="name">加载中...</span><span class="code">${fund.code}</span></div><div class="right"><span class="rate" style="color:gray">--</span></div></div>`;
                     return;
                 }
 
-                // 计算逻辑
-                const current = parseFloat(item.gsz || item.dwjz);
-                const yesterday = parseFloat(item.dwjz);
-                const rate = parseFloat(item.gszzl || "0");
+                // 计算逻辑 (新浪数据)
+                // item.net = 最新净值(或估值), item.yesterday = 昨日净值
+                const current = parseFloat(item.net);
+                const yesterday = parseFloat(item.yesterday);
                 
-                // 只有当天有估值才算当日收益
-                let profit = 0;
-                if (item.gsz && item.dwjz) {
-                    profit = (current - yesterday) * fund.shares;
+                // 计算涨跌幅
+                let rate = 0;
+                if(yesterday > 0) {
+                    rate = ((current - yesterday) / yesterday) * 100;
                 }
                 
+                const profit = (current - yesterday) * fund.shares;
                 totalProfit += profit;
+                
                 const isUp = rate >= 0;
+                const rateStr = rate.toFixed(2);
 
                 html += `
                 <div class="card">
@@ -98,7 +99,7 @@
                         <span class="code">${fund.code}</span>
                     </div>
                     <div class="right">
-                        <span class="rate ${isUp ? 'up' : 'down'}">${isUp ? '+' : ''}${rate}%</span>
+                        <span class="rate ${isUp ? 'up' : 'down'}">${isUp ? '+' : ''}${rateStr}%</span>
                         <span class="profit ${profit >= 0 ? 'up' : 'down'}">${profit > 0 ? '+' : ''}${profit.toFixed(1)}</span>
                     </div>
                 </div>`;
@@ -106,7 +107,7 @@
 
             if (!isHidden) {
                 html += `<div class="total-area" style="text-align:center; margin-top:20px;">
-                    <div style="font-size:14px; color:gray;">今日预估盈亏</div>
+                    <div style="font-size:14px; color:gray;">今日收益 (Sina源)</div>
                     <div style="font-size:28px; font-weight:bold; margin-top:5px; color:${totalProfit>=0?'#ff3b30':'#34c759'}">
                         ${totalProfit>0?'+':''}${totalProfit.toFixed(1)}
                     </div>
@@ -115,28 +116,46 @@
             container.innerHTML = html;
         }
 
-        // === 核心：使用 Vercel 自家路由转发 (最稳方案) ===
-        async function fetchData() {
-            const promises = myFunds.map(fund => {
-                // 直接请求我们刚才在 vercel.json 里配置的 /api/fund 路径
-                // Vercel 服务器会在后台帮我们去请求天天基金，绕过浏览器限制
-                return fetch(`/api/fund?code=${fund.code}&t=${Date.now()}`)
-                    .then(res => res.text())
-                    .then(text => {
-                        const match = text.match(/jsonpgz\((.*?)\)/);
-                        return match ? JSON.parse(match[1]) : null;
-                    })
-                    .catch(err => null);
-            });
-
-            const results = await Promise.all(promises);
-            const valid = results.filter(r => r !== null);
+        // === 核心：新浪财经直连 (无视 Vercel 屏蔽) ===
+        function fetchData() {
+            document.getElementById('status-msg').style.display = 'block';
             
-            if (valid.length > 0) {
-                render(valid);
-            } else {
-                document.getElementById('status-msg').innerText = "加载超时，Vercel 正在冷启动，请手动刷新页面试试";
-            }
+            // 构造新浪的 URL，格式 list=f_代码,f_代码
+            const codes = myFunds.map(f => 'f_' + f.code).join(',');
+            const script = document.createElement('script');
+            // 关键：使用 charset="gbk" 防止中文乱码
+            script.charset = "gbk"; 
+            script.src = `https://hq.sinajs.cn/list=${codes}?t=${Date.now()}`;
+            
+            script.onload = () => {
+                // 数据回来了，解析它
+                const dataMap = {};
+                myFunds.forEach(fund => {
+                    // 新浪返回的变量名是 hq_str_f_代码
+                    const varName = `hq_str_f_${fund.code}`;
+                    const dataStr = window[varName];
+                    if (dataStr) {
+                        const parts = dataStr.split(',');
+                        // 格式: 基金名, 最新净值, 累计净值, 昨日净值, ..., 日期
+                        if(parts.length > 3) {
+                            dataMap[fund.code] = {
+                                name: parts[0],
+                                net: parts[1],       // 最新净值
+                                yesterday: parts[3]  // 昨日净值
+                            };
+                        }
+                    }
+                });
+                render(dataMap);
+            };
+            
+            script.onerror = () => {
+                document.getElementById('status-msg').innerText = "加载失败，请检查网络";
+            };
+            
+            document.body.appendChild(script);
+            // 稍后清理
+            setTimeout(() => { if(script.parentNode) script.parentNode.removeChild(script); }, 2000);
         }
 
         function toggleMode() {
@@ -164,8 +183,10 @@
             }
         }
 
+        // 启动
         fetchData();
-        setInterval(fetchData, 30000);
+        // 60秒刷新一次 (新浪不需要太频繁)
+        setInterval(fetchData, 60000);
     </script>
 </body>
 </html>
