@@ -34,7 +34,7 @@
 
         .settings-btn { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); background: rgba(128,128,128,0.3); padding: 10px 20px; border-radius: 20px; font-size: 14px; backdrop-filter: blur(10px); font-weight: 600; cursor: pointer;}
         
-        #error-msg { color: var(--red); font-size: 14px; text-align: center; margin-top: 20px; display: none;}
+        #error-msg { color: var(--red); font-size: 12px; text-align: center; margin-top: 20px; display: none; line-height: 1.5; }
     </style>
 </head>
 <body>
@@ -45,7 +45,10 @@
     </div>
 
     <div id="fundList">
-        <div style="text-align:center; color:#999; margin-top:50px;">正在连接数据...</div>
+        <div style="text-align:center; color:#999; margin-top:50px;">
+            正在连接官方数据...<br>
+            <span style="font-size:12px; opacity:0.6">(V3.0 Proxy版)</span>
+        </div>
     </div>
     
     <div id="error-msg"></div>
@@ -60,26 +63,40 @@
         ];
         let isHidden = localStorage.getItem('isHidden') === 'true';
 
-        // === 2. 核心渲染函数 ===
-        function render(dataMap) {
+        // === 2. 渲染函数 ===
+        function render(dataList) {
             const container = document.getElementById('fundList');
             document.body.className = isHidden ? 'blur' : '';
             document.getElementById('appTitle').innerText = isHidden ? '📚 单词打卡' : '💰 我的小金库';
 
+            if(!dataList || dataList.length === 0) return;
+
             let totalProfit = 0;
             let html = '';
 
+            // 建立字典方便查询
+            const dataMap = {};
+            dataList.forEach(d => dataMap[d.fundcode] = d);
+
             myFunds.forEach(fund => {
                 const item = dataMap[fund.code];
-                if (!item) return;
+                // 如果获取失败，显示占位
+                if (!item) {
+                    html += `<div class="card"><div class="left"><span class="name">加载中...</span><span class="code">${fund.code}</span></div></div>`;
+                    return;
+                }
 
-                // 计算逻辑：(当前估值 expectWorth - 昨日净值 netWorth) * 份额
-                // 如果是收盘后，expectWorth可能为空，则用 netWorth
-                const currentPrice = parseFloat(item.expectWorth || item.netWorth);
-                const yesterdayPrice = parseFloat(item.netWorth);
-                const growthRate = parseFloat(item.expectGrowth || "0");
+                // 计算逻辑：天天基金返回的 gsz(实时净值) - dwjz(昨日净值)
+                const currentPrice = parseFloat(item.gsz || item.dwjz); // 如果没开盘就用净值
+                const yesterdayPrice = parseFloat(item.dwjz);
+                const growthRate = parseFloat(item.gszzl || "0");
                 
-                const profit = (currentPrice - yesterdayPrice) * fund.shares;
+                // 只有当有实时估值时才算收益，否则为0
+                let profit = 0;
+                if(item.gsz && item.dwjz) {
+                     profit = (currentPrice - yesterdayPrice) * fund.shares;
+                }
+                
                 totalProfit += profit;
                 const isUp = growthRate >= 0;
 
@@ -108,66 +125,38 @@
             container.innerHTML = html;
         }
 
-        // === 3. 获取数据 (换用了更稳定的 HTTPS 接口) ===
-        function fetchData() {
-            const codes = myFunds.map(f => f.code).join(',');
-            // 使用 DoctorXiong 接口，支持 HTTPS，完美适配 Vercel
-            fetch(`https://api.doctorxiong.club/v1/fund?code=${codes}`)
-                .then(response => response.json())
-                .then(res => {
-                    if (res.code === 200) {
-                        // 转换数据格式方便查找
-                        const map = {};
-                        res.data.forEach(item => {
-                            map[item.code] = item;
-                        });
-                        render(map);
-                        document.getElementById('error-msg').style.display = 'none';
-                    } else {
-                        throw new Error(res.msg || "数据异常");
-                    }
-                })
-                .catch(err => {
-                    console.error(err);
-                    document.getElementById('error-msg').style.display = 'block';
-                    document.getElementById('error-msg').innerText = "加载失败: " + err.message + "\n(请检查网络或基金代码)";
-                });
-        }
+        // === 3. 核心：通过 Proxy 获取官方数据 ===
+        async function fetchData() {
+            const promises = myFunds.map(fund => {
+                // 原始 HTTP 官方接口
+                const targetUrl = `http://fundgz.1234567.com.cn/js/gszzl.js?code=${fund.code}&t=${Date.now()}`;
+                // 使用 allorigins 代理转发 (将 HTTP 转为 HTTPS)
+                const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
+                
+                return fetch(proxyUrl)
+                    .then(res => {
+                        if(!res.ok) throw new Error("Network");
+                        return res.text();
+                    })
+                    .then(text => {
+                        // 解析 JSONP: jsonpgz({...});
+                        const match = text.match(/jsonpgz\((.*?)\)/);
+                        if(match && match[1]) return JSON.parse(match[1]);
+                        return null;
+                    })
+                    .catch(err => null); // 单个失败不影响整体
+            });
 
-        // === 4. 交互逻辑 ===
-        function toggleMode() {
-            isHidden = !isHidden;
-            localStorage.setItem('isHidden', isHidden);
-            // 重新触发一次获取数据来刷新界面，或者手动调用 render 如果保存了上次数据
-            fetchData();
-        }
-
-        function editConfig() {
-            const defaultStr = myFunds.map(f => `${f.code},${f.shares}`).join('; ');
-            const input = prompt("修改持仓 (格式: 代码,份额)\n多只基金用分号隔开:", defaultStr);
-            
-            if (input) {
-                try {
-                    const newFunds = input.split(/[;；]/).map(str => { // 支持中英文分号
-                        const parts = str.trim().split(/[,，]/); // 支持中英文逗号
-                        if (parts.length < 2) return null;
-                        return { code: parts[0].trim(), shares: parseFloat(parts[1]) };
-                    }).filter(item => item !== null);
-                    
-                    if(newFunds.length > 0) {
-                        myFunds = newFunds;
-                        localStorage.setItem('myFunds', JSON.stringify(myFunds));
-                        fetchData(); // 立即刷新
-                    }
-                } catch (e) {
-                    alert("格式有点问题，请检查一下~");
+            try {
+                const results = await Promise.all(promises);
+                const validResults = results.filter(r => r !== null);
+                
+                if (validResults.length > 0) {
+                    render(validResults);
+                    document.getElementById('error-msg').style.display = 'none';
+                } else {
+                    throw new Error("所有数据加载失败，请检查网络");
                 }
-            }
-        }
-
-        // 启动
-        fetchData();
-        setInterval(fetchData, 30000); // 30秒刷新一次
-    </script>
-</body>
-</html>
+            } catch (err) {
+                console.error(err);
+                document.getElementById('error-msg').style.display = '
