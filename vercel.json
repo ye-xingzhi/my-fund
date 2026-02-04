@@ -1,8 +1,0 @@
-{
-  "rewrites": [
-    {
-      "source": "/api/fund",
-      "destination": "http://fundgz.1234567.com.cn/js/gszzl.js"
-    }
-  ]
-}
