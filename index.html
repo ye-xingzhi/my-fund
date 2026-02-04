@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="摸鱼助手">
+    <title>我的基金</title>
+    <style>
+        :root { --bg: #f2f2f7; --card: #ffffff; --text: #000; --red: #ff3b30; --green: #34c759; }
+        @media (prefers-color-scheme: dark) {
+            :root { --bg: #000000; --card: #1c1c1e; --text: #fff; }
+        }
+        body { margin: 0; padding: 20px; padding-top: 50px; background: var(--bg); font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; color: var(--text); -webkit-user-select: none; }
+        
+        /* 头部样式 */
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .title { font-size: 28px; font-weight: bold; }
+        .mask-btn { font-size: 24px; cursor: pointer; }
+
+        /* 卡片样式 */
+        .card { background: var(--card); border-radius: 14px; padding: 16px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+        .left { display: flex; flex-direction: column; }
+        .name { font-size: 16px; font-weight: 600; margin-bottom: 4px; }
+        .code { font-size: 12px; opacity: 0.5; }
+        .right { text-align: right; }
+        .rate { font-size: 18px; font-weight: bold; display: block; }
+        .profit { font-size: 14px; font-weight: 500; margin-top: 4px; }
+        
+        /* 颜色 */
+        .up { color: var(--red); }
+        .down { color: var(--green); }
+        
+        /* 摸鱼模式（隐藏金额） */
+        .blur .profit { filter: blur(5px); opacity: 0.5; }
+
+        /* 底部配置按钮 */
+        .settings { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); background: rgba(128,128,128,0.2); padding: 8px 16px; border-radius: 20px; font-size: 12px; backdrop-filter: blur(10px); }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <div class="title" id="appTitle">📚 单词打卡</div>
+        <div class="mask-btn" onclick="toggleMode()">👁️</div>
+    </div>
+
+    <div id="fundList">
+        <div style="text-align:center; color:#999; margin-top:50px;">加载中...</div>
+    </div>
+
+    <div class="settings" onclick="editConfig()">⚙️ 配置持仓</div>
+
+    <script>
+        // === 核心逻辑 ===
+        
+        // 1. 读取本地配置 (如果没有则使用默认)
+        let myFunds = JSON.parse(localStorage.getItem('myFunds')) || [
+            { code: "021074", shares: 1000 }, // 默认示例：华夏黄金
+            { code: "005827", shares: 500 }   // 默认示例
+        ];
+
+        let isHidden = localStorage.getItem('isHidden') === 'true';
+
+        // 2. 渲染页面
+        function render() {
+            const container = document.getElementById('fundList');
+            document.body.className = isHidden ? 'blur' : '';
+            document.getElementById('appTitle').innerText = isHidden ? '📚 单词打卡' : '💰 我的小金库';
+            
+            // 如果数据还没回来，保持加载状态
+            if(window.loadedData) {
+                let totalProfit = 0;
+                let html = '';
+                
+                myFunds.forEach(fund => {
+                    const data = window.loadedData[fund.code];
+                    if(!data) return;
+
+                    // 计算收益：(当前估值 - 昨日净值) * 份额
+                    const profit = (data.gsz - data.dwjz) * fund.shares;
+                    totalProfit += profit;
+                    
+                    const isUp = data.gszzl >= 0;
+                    
+                    html += `
+                    <div class="card">
+                        <div class="left">
+                            <span class="name">${data.name.substring(0,6)}..</span>
+                            <span class="code">${fund.code}</span>
+                        </div>
+                        <div class="right">
+                            <span class="rate ${isUp ? 'up' : 'down'}">${isUp ? '+' : ''}${data.gszzl}%</span>
+                            <span class="profit ${profit >= 0 ? 'up' : 'down'}">${profit > 0 ? '+' : ''}${profit.toFixed(1)}</span>
+                        </div>
+                    </div>`;
+                });
+                
+                // 底部增加总收益
+                if(!isHidden) {
+                    html += `<div style="text-align:center; margin-top:20px; font-weight:bold; font-size:20px; color:${totalProfit>=0?'#ff3b30':'#34c759'}">
+                        今日预估: ${totalProfit>0?'+':''}${totalProfit.toFixed(1)}
+                    </div>`;
+                }
+                
+                container.innerHTML = html;
+            }
+        }
+
+        // 3. 获取数据 (使用 JSONP 解决跨域)
+        function fetchData() {
+            const codes = myFunds.map(f => f.code);
+            window.loadedData = {};
+            let loadedCount = 0;
+
+            codes.forEach(code => {
+                const script = document.createElement('script');
+                // 加上时间戳防止缓存
+                script.src = `https://fundgz.1234567.com.cn/js/gszzl.js?code=${code}&t=${Date.now()}`;
+                
+                // 定义回调捕获
+                // 接口返回格式: jsonpgz({"fundcode":"...","gszzl":"..."});
+                // 我们通过重写 jsonpgz 函数来截获数据
+                window.jsonpgz = function(data) {
+                    window.loadedData[data.fundcode] = data;
+                    loadedCount++;
+                    if(loadedCount === codes.length) {
+                        render();
+                    }
+                };
+                
+                script.onerror = () => { loadedCount++; }; // 错误也继续
+                document.body.appendChild(script);
+                // 清理标签
+                setTimeout(() => document.body.removeChild(script), 1000);
+            });
+        }
+
+        // 4. 交互功能
+        function toggleMode() {
+            isHidden = !isHidden;
+            localStorage.setItem('isHidden', isHidden);
+            render();
+        }
+
+        function editConfig() {
+            const input = prompt("请输入持仓 (格式: 代码,份额; 代码,份额)", 
+                myFunds.map(f => `${f.code},${f.shares}`).join('; '));
+            
+            if (input) {
+                try {
+                    const newFunds = input.split(';').map(item => {
+                        const [c, s] = item.trim().split(/[,，]/); // 支持中英文逗号
+                        if(!c || !s) throw new Error();
+                        return { code: c.trim(), shares: parseFloat(s) };
+                    });
+                    myFunds = newFunds;
+                    localStorage.setItem('myFunds', JSON.stringify(myFunds));
+                    alert("保存成功！即将刷新");
+                    fetchData();
+                } catch(e) {
+                    alert("格式错误，请检查。例如：021074,1000; 005827,500");
+                }
+            }
+        }
+
+        // 启动
+        fetchData();
+        // 每30秒自动刷新
+        setInterval(fetchData, 30000);
+        render(); // 初始渲染
+    </script>
+</body>
+</html>
